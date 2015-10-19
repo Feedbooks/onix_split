@@ -3,6 +3,8 @@
 Command onix_split generates single-product ONIX files from one larger ONIX
 file or from a Zip archive containing ONIX files.
 
+`go install githubt.com/feedbooks/onix_split`
+
 ## Usage:
 
 `onix_split -file_path path [flag]`
