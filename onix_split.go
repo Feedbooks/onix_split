@@ -27,21 +27,23 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
 
 /* TODO:
-- Validate first generated product xml.
-- Option to validate each generated product xml.
+- Replace regular expressions with file.ext
+- Skip weird Apple files in Zip archives.
 */
 
-var pattern, destDir, destFilePrefix, filePath string
-var toFiles bool
-
-var total_prods = 0
-
 func main() {
+
+	var pattern, destDir, destFilePrefix, filePath string
+
+	var total_prods = 0
+
+	var toFiles bool
 
 	flag.StringVar(&filePath, "file_path", "", "Path to the file to split")
 	flag.StringVar(&pattern, "pattern", "", "A pattern to match when file_path is to a multi-file archive")
@@ -73,19 +75,22 @@ func main() {
 		}
 		defer r.Close()
 		for _, f := range r.File {
-			if ix_xml, _ := regexp.MatchString(".xml$", f.Name); ix_xml {
+			ext := filepath.Ext(f.Name)
+			name_good := ext == ".xml" || ext == ".onix"
+			name_bad := f.Name[0] == '.' || f.Name[0] == '_'
+			if name_good && !name_bad {
 				if pattern == "" {
 					buff_reader := ZippedToBuf(f)
-					Split(&buff_reader)
+					total_prods += split(&buff_reader, toFiles, destDir, destFilePrefix, total_prods)
 				} else if match, _ := regexp.MatchString(pattern, f.Name); match {
 					buff_reader := ZippedToBuf(f)
-					Split(&buff_reader)
+					total_prods += split(&buff_reader, toFiles, destDir, destFilePrefix, total_prods)
 				}
 			}
 		}
 	} else {
 		buff_reader := bufio.NewReader(file)
-		Split(buff_reader)
+		total_prods += split(buff_reader, toFiles, destDir, destFilePrefix, total_prods)
 	}
 
 	fmt.Printf("Collected %d products\n", total_prods)
@@ -100,11 +105,14 @@ func ZippedToBuf(f *zip.File) bufio.Reader {
 	return *buff_reader
 }
 
-func Split(buff_reader *bufio.Reader) {
+func split(buff_reader *bufio.Reader, toFiles bool, destDir, destFilePrefix string, total_prods int) int {
 	var header_str = ""
+	var message_tag = ""
 	var product_tag = ""
 
 	leftovers := ""
+
+	buffer_prods := 0
 
 	for {
 		buff := make([]byte, 2<<20)
@@ -121,23 +129,27 @@ func Split(buff_reader *bufio.Reader) {
 		if header_str == "" {
 			header_str, buff_str = setHeader(&buff_str)
 		}
+		if message_tag == "" {
+			message_tag, _ = setTagVariant(&header_str, []string{"ONIXMessage", "ONIXmessage"})
+		}
 		if product_tag == "" {
-			product_tag = SetTag("product", &buff_str)
+			product_tag, _ = setTagVariant(&buff_str, []string{"Product", "product"})
 		}
 
 		p_count := strings.Count(buff_str, "</"+product_tag+">")
 		arr := strings.Split(buff_str, "</"+product_tag+">")
 		leftovers = arr[p_count]
 		for i := 0; i < p_count; i++ {
-			total_prods++
-			product_str := fmt.Sprintf("%s\n%s</%s>\n</ONIXmessage>", header_str, string(arr[i]), product_tag)
+			buffer_prods++
+			product_str := fmt.Sprintf("%s\n%s</%s>\n</%s>", header_str, string(arr[i]), product_tag, message_tag)
 			if toFiles {
-				WriteSplinter(&product_str, destDir, destFilePrefix, total_prods)
+				WriteSplinter(&product_str, destDir, destFilePrefix, total_prods+buffer_prods)
 			} else {
 				fmt.Println(product_str)
 			}
 		}
 	}
+	return buffer_prods
 }
 
 func WriteSplinter(onix *string, directory, prefix string, serial int) {
@@ -154,28 +166,21 @@ func WriteSplinter(onix *string, directory, prefix string, serial int) {
 	splinter.WriteString(*onix)
 }
 
-// SetTag determines which format (lower case or title) of a tag is used the file.
-// It returns the tag in correct format.
-func SetTag(tag string, hay *string) string {
-	lc := strings.ToLower(tag)
-	title := strings.ToTitle(tag)
-	found := -1
-
-	if found = strings.Index(*hay, "<"+lc+">"); found > 0 {
-		return lc
-	} else if found = strings.Index(*hay, "<"+title+">"); found > 0 {
-		return title
-	} else {
-		panic("No " + tag + " tag found")
+func setTagVariant(hay *string, variants []string) (string, error) {
+	for _, v := range variants {
+		if i := strings.Index(*hay, "<"+v); i > -1 {
+			return v, nil
+		}
 	}
+	return "", fmt.Errorf("No %s tag found", variants[0])
 }
-
 func setHeader(hay *string) (string, string) {
-	close_header_tag := "</" + SetTag("header", hay) + ">"
+	header_tag, _ := setTagVariant(hay, []string{"Header", "header"})
+	close_header_tag := "</" + header_tag + ">"
 	header_end := strings.Index(*hay, close_header_tag) + len(close_header_tag)
 
 	str := string(*hay)
 	header_str := str[0:header_end]
-	rest_of_hay := str[header_end+1 : len(str)]
+	rest_of_hay := str[header_end:]
 	return header_str, rest_of_hay
 }
